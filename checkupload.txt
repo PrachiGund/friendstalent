@@ -1,0 +1,47 @@
+
+function mcpResult(raw) {
+  let msg = raw;
+  if (typeof raw === 'string') {
+    const d = raw.split('\n').filter(l => l.startsWith('data:'));
+    msg = JSON.parse(d.length ? d[d.length - 1].slice(5).trim() : raw);
+  }
+  if (msg.error) throw new Error('MCP protocol error: ' + JSON.stringify(msg.error));
+  const res = msg.result || {};
+  if (res.isError) throw new Error('Colab tool error: ' + JSON.stringify(res.content).slice(0, 4000));
+  return res;
+}
+function allStrings(o, acc = []) {
+  if (typeof o === 'string') acc.push(o);
+  else if (o && typeof o === 'object') for (const v of Object.values(o)) allStrings(v, acc);
+  return acc;
+}
+function marked(res) {
+  // Colab returns the output both as structuredContent and as a JSON-encoded text copy
+  // (quotes escaped as \"). Try structuredContent first, then every other string, and
+  // un-escape the payload when needed.
+  const strings = allStrings(res.structuredContent || {}).concat(allStrings(res.content || []), allStrings(res));
+  let truncated = false, lastErr = null;
+  for (const s of strings) {
+    const i = s.indexOf('<<<SPRK_JSON>>>');
+    if (i < 0) continue;
+    const j = s.indexOf('<<<END>>>', i);
+    if (j < 0) { truncated = true; continue; }
+    const payload = s.slice(i + 15, j);
+    try { return JSON.parse(payload); } catch (e) { lastErr = e; }
+    try { return JSON.parse(JSON.parse('"' + payload + '"')); } catch (e) { lastErr = e; }
+  }
+  if (truncated) throw new Error('Colab output was truncated (file too large to read back in one call).');
+  if (lastErr) throw new Error('Could not parse Python result: ' + lastErr.message);
+  throw new Error('Python did not print its result marker. Colab output: ' + JSON.stringify(res).slice(0, 4000));
+}
+
+const items = $input.all();
+for (const it of items) {
+  const res = mcpResult(it.json.data);
+  if (!allStrings(res).some(s => s.includes('PART_OK'))) {
+    throw new Error('A chunk upload did not confirm: ' + JSON.stringify(res).slice(0, 3000));
+  }
+}
+const total = $('Prepare Upload Chunks').first().json.total;
+if (items.length !== total) throw new Error(`Uploaded ${items.length} of ${total} chunks`);
+return [{ json: { uploadedChunks: items.length } }];
